@@ -7,8 +7,9 @@
  * an ad-blocker or tracking-protection feature blocking a third-party
  * script domain, because there isn't one.
  *
- * Idle: slow horizontal spin. Hover: subtle magnetic tilt toward cursor.
- * Click+drag: full manual spin control, released with inertia that eases
+ * Idle: slow horizontal spin. Hover: the logo drifts a little toward the
+ * cursor's direction (magnetic pull). Click+drag: full manual spin control,
+ * released with inertia that eases
  * back into the idle spin. Chrome look via a matcap texture sampled by
  * view-space normal (no environment map / lighting setup needed).
  *
@@ -36,8 +37,26 @@
 
     container.style.touchAction = "none";
     container.style.cursor = "grab";
+    if (window.getComputedStyle(container).position === "static") {
+      container.style.position = "relative";
+    }
+
+    const shadowEl = document.createElement("div");
+    shadowEl.setAttribute("aria-hidden", "true");
+    shadowEl.style.position = "absolute";
+    shadowEl.style.left = "50%";
+    shadowEl.style.top = "50%";
+    shadowEl.style.width = "78%";
+    shadowEl.style.height = "52%";
+    shadowEl.style.transform = "translate(-50%, -50%)";
+    shadowEl.style.borderRadius = "50%";
+    shadowEl.style.background = "radial-gradient(ellipse at center, rgba(0,0,0,0.55) 0%, rgba(0,0,0,0.28) 45%, rgba(0,0,0,0) 72%)";
+    shadowEl.style.filter = "blur(6px)";
+    shadowEl.style.pointerEvents = "none";
+    container.appendChild(shadowEl);
 
     const canvas = document.createElement("canvas");
+    canvas.style.position = "relative";
     canvas.style.display = "block";
     canvas.style.width = "100%";
     canvas.style.height = "100%";
@@ -94,6 +113,7 @@
     return out;
   }
   function m4translate(x,y,z){ const m=m4identity(); m[12]=x;m[13]=y;m[14]=z; return m; }
+  function m4scale(s){ const m=m4identity(); m[0]=s;m[5]=s;m[10]=s; return m; }
   function m4rotateX(r){ const c=Math.cos(r),s=Math.sin(r); const m=m4identity(); m[5]=c;m[6]=s;m[9]=-s;m[10]=c; return m; }
   function m4rotateY(r){ const c=Math.cos(r),s=Math.sin(r); const m=m4identity(); m[0]=c;m[2]=-s;m[8]=s;m[10]=c; return m; }
   function m4rotateZ(r){ const c=Math.cos(r),s=Math.sin(r); const m=m4identity(); m[0]=c;m[1]=s;m[4]=-s;m[5]=c; return m; }
@@ -209,16 +229,17 @@
 
     const prefersReducedMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-    const IDLE_SPEED = prefersReducedMotion ? 0 : 0.70;
+    const IDLE_SPEED = prefersReducedMotion ? 0 : 0.55;
     const DRAG_SENSITIVITY = 0.012;
-    const MAX_TILT = 0.07;
+    const MAX_PULL = 0.20;
     const HOVER_EASE = 6.0;
     const RELEASE_EASE = 2.2;
     const MAX_FLICK_VEL = 14.0;
     const CAMERA_Z = 5.2;
     const FOV_Y = 32 * Math.PI / 180;
+    const MODEL_SCALE = 1.5;
 
-    let rotY = 0, velY = IDLE_SPEED, tiltX = 0, tiltZ = 0, tiltTargetX = 0, tiltTargetZ = 0;
+    let rotY = 0, velY = IDLE_SPEED, pullX = 0, pullY = 0, pullTargetX = 0, pullTargetY = 0;
     let dragging = false, hovering = false;
     let lastPointerX = 0, lastPointerT = 0;
     let recentDeltas = [];
@@ -227,7 +248,7 @@
     function lerp(a,b,t){ return a + (b-a)*t; }
 
     container.addEventListener("pointerenter", () => { hovering = true; });
-    container.addEventListener("pointerleave", () => { hovering = false; tiltTargetX = 0; tiltTargetZ = 0; });
+    container.addEventListener("pointerleave", () => { hovering = false; pullTargetX = 0; pullTargetY = 0; });
 
     container.addEventListener("pointermove", (e) => {
       const rect = container.getBoundingClientRect();
@@ -235,8 +256,9 @@
       const ny = ((e.clientY - rect.top) / rect.height) * 2 - 1;
 
       if (!dragging && hovering) {
-        tiltTargetX = clamp(ny, -1, 1) * MAX_TILT;
-        tiltTargetZ = clamp(-nx, -1, 1) * MAX_TILT * 0.6;
+        // pull the object a little toward wherever the cursor is, in the cursor's direction
+        pullTargetX = clamp(nx, -1, 1) * MAX_PULL;
+        pullTargetY = clamp(-ny, -1, 1) * MAX_PULL;
       }
 
       if (dragging) {
@@ -259,7 +281,7 @@
       lastPointerX = e.clientX;
       lastPointerT = performance.now();
       recentDeltas = [];
-      tiltTargetX = 0; tiltTargetZ = 0;
+      pullTargetX = 0; pullTargetY = 0;
     });
 
     function endDrag(e) {
@@ -310,13 +332,15 @@
         velY = lerp(velY, IDLE_SPEED, 1 - Math.exp(-RELEASE_EASE * dt));
         rotY += velY * dt;
       }
-      tiltX = lerp(tiltX, tiltTargetX, 1 - Math.exp(-HOVER_EASE * dt));
-      tiltZ = lerp(tiltZ, tiltTargetZ, 1 - Math.exp(-HOVER_EASE * dt));
+      pullX = lerp(pullX, pullTargetX, 1 - Math.exp(-HOVER_EASE * dt));
+      pullY = lerp(pullY, pullTargetY, 1 - Math.exp(-HOVER_EASE * dt));
 
-      const model = m4multiply(m4multiply(m4rotateY(rotY), m4rotateX(tiltX)), m4rotateZ(tiltZ));
+      const rotation = m4rotateY(rotY);
+      const scaled = m4multiply(rotation, m4scale(MODEL_SCALE));
+      const model = m4multiply(m4translate(pullX, pullY, 0), scaled);
       const view = m4translate(0, 0, -CAMERA_Z);
       const modelView = m4multiply(view, model);
-      const normalMatrix = mat3FromMat4(model);
+      const normalMatrix = mat3FromMat4(rotation);
       const aspect = canvas.width / canvas.height;
       const projection = m4perspective(FOV_Y, aspect, 0.1, 100);
 
