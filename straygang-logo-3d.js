@@ -50,8 +50,8 @@
     shadowEl.style.height = "52%";
     shadowEl.style.transform = "translate(-50%, -50%)";
     shadowEl.style.borderRadius = "50%";
-    shadowEl.style.background = "radial-gradient(ellipse at center, rgba(0,0,0,0.55) 0%, rgba(0,0,0,0.28) 45%, rgba(0,0,0,0) 72%)";
-    shadowEl.style.filter = "blur(6px)";
+    shadowEl.style.background = "radial-gradient(ellipse at center, rgba(0,0,0,0.92) 0%, rgba(0,0,0,0.75) 35%, rgba(0,0,0,0.4) 58%, rgba(0,0,0,0) 78%)";
+    shadowEl.style.filter = "blur(4px)";
     shadowEl.style.pointerEvents = "none";
     container.appendChild(shadowEl);
 
@@ -144,6 +144,35 @@
     "  gl_FragColor = texture2D(uMatcap, uv);\n" +
     "}\n";
 
+  // fullscreen post-process pass: RGB channel split + faint scanlines + vignette,
+  // for a subtle retro CRT/VHS feel over the rendered chrome logo
+  const POST_VERTEX_SRC = "attribute vec2 aQuadPos;\n" +
+    "varying vec2 vUv;\n" +
+    "void main(){\n" +
+    "  vUv = aQuadPos * 0.5 + 0.5;\n" +
+    "  gl_Position = vec4(aQuadPos, 0.0, 1.0);\n" +
+    "}\n";
+
+  const POST_FRAGMENT_SRC = "precision mediump float;\n" +
+    "varying vec2 vUv;\n" +
+    "uniform sampler2D uScene;\n" +
+    "uniform vec2 uAberration;\n" +
+    "uniform float uScanlineCount;\n" +
+    "uniform float uScanlineStrength;\n" +
+    "uniform float uVignetteStrength;\n" +
+    "void main(){\n" +
+    "  vec4 cr = texture2D(uScene, vUv + uAberration);\n" +
+    "  vec4 cg = texture2D(uScene, vUv);\n" +
+    "  vec4 cb = texture2D(uScene, vUv - uAberration);\n" +
+    "  float a = max(cr.a, max(cg.a, cb.a));\n" +
+    "  vec3 col = vec3(cr.r, cg.g, cb.b);\n" +
+    "  float scan = sin(vUv.y * uScanlineCount * 3.14159265);\n" +
+    "  col *= 1.0 - uScanlineStrength * (0.5 + 0.5 * scan);\n" +
+    "  vec2 centered = vUv - 0.5;\n" +
+    "  col *= 1.0 - uVignetteStrength * dot(centered, centered) * 2.0;\n" +
+    "  gl_FragColor = vec4(col, a);\n" +
+    "}\n";
+
   function compileShader(gl, type, src) {
     const sh = gl.createShader(type);
     gl.shaderSource(sh, src);
@@ -156,14 +185,9 @@
     return sh;
   }
 
-  function setup(gl, container, canvas) {
-    const positions = new Float32Array(b64ToArrayBuffer(POS_B64));
-    const normals   = new Float32Array(b64ToArrayBuffer(NORM_B64));
-    const indices   = new Uint16Array(b64ToArrayBuffer(IDX_B64));
-    const indexCount = indices.length;
-
-    const vs = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SRC);
-    const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SRC);
+  function linkProgram(gl, vertSrc, fragSrc) {
+    const vs = compileShader(gl, gl.VERTEX_SHADER, vertSrc);
+    const fs = compileShader(gl, gl.FRAGMENT_SHADER, fragSrc);
     const program = gl.createProgram();
     gl.attachShader(program, vs);
     gl.attachShader(program, fs);
@@ -171,6 +195,18 @@
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
       throw new Error("Program link error: " + gl.getProgramInfoLog(program));
     }
+    return program;
+  }
+
+  function setup(gl, container, canvas) {
+    const positions = new Float32Array(b64ToArrayBuffer(POS_B64));
+    const normals   = new Float32Array(b64ToArrayBuffer(NORM_B64));
+    const indices   = new Uint16Array(b64ToArrayBuffer(IDX_B64));
+    const indexCount = indices.length;
+
+    const program = linkProgram(gl, VERTEX_SRC, FRAGMENT_SRC);
+    const postProgram = linkProgram(gl, POST_VERTEX_SRC, POST_FRAGMENT_SRC);
+
     gl.useProgram(program);
 
     const aPosition = gl.getAttribLocation(program, "aPosition");
@@ -213,6 +249,42 @@
     gl.depthFunc(gl.LEQUAL);
     gl.disable(gl.CULL_FACE);
 
+    // ---- post-process pass (fullscreen quad + render target) ----
+    const aQuadPos = gl.getAttribLocation(postProgram, "aQuadPos");
+    const uScene = gl.getUniformLocation(postProgram, "uScene");
+    const uAberration = gl.getUniformLocation(postProgram, "uAberration");
+    const uScanlineCount = gl.getUniformLocation(postProgram, "uScanlineCount");
+    const uScanlineStrength = gl.getUniformLocation(postProgram, "uScanlineStrength");
+    const uVignetteStrength = gl.getUniformLocation(postProgram, "uVignetteStrength");
+
+    const quadBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+
+    const sceneTex = gl.createTexture();
+    const fbo = gl.createFramebuffer();
+    const depthRb = gl.createRenderbuffer();
+    let fboW = 0, fboH = 0;
+
+    function ensureFBO(w, h) {
+      if (w === fboW && h === fboH) return;
+      fboW = w; fboH = h;
+      gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+      gl.bindRenderbuffer(gl.RENDERBUFFER, depthRb);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, w, h);
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, sceneTex, 0);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depthRb);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+
     function resize() {
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const w = Math.max(1, Math.round(container.clientWidth * dpr));
@@ -221,6 +293,7 @@
         canvas.width = w;
         canvas.height = h;
       }
+      ensureFBO(canvas.width, canvas.height);
       gl.viewport(0, 0, canvas.width, canvas.height);
     }
     resize();
@@ -238,6 +311,10 @@
     const CAMERA_Z = 5.2;
     const FOV_Y = 32 * Math.PI / 180;
     const MODEL_SCALE = 1.5;
+    const ABERRATION_PX = 2.2;      // RGB-split distance, in pixels, for the retro CRT feel
+    const SCANLINE_COUNT = 140;     // scanlines across the container regardless of resolution
+    const SCANLINE_STRENGTH = 0.05; // how dark the scanline modulation gets (subtle)
+    const VIGNETTE_STRENGTH = 0.22; // edge darkening amount
 
     let rotY = 0, velY = IDLE_SPEED, pullX = 0, pullY = 0, pullTargetX = 0, pullTargetY = 0;
     let dragging = false, hovering = false;
@@ -344,6 +421,11 @@
       const aspect = canvas.width / canvas.height;
       const projection = m4perspective(FOV_Y, aspect, 0.1, 100);
 
+      // ---- pass 1: render the chrome logo into an offscreen texture ----
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.viewport(0, 0, fboW, fboH);
+      gl.useProgram(program);
+      gl.enable(gl.DEPTH_TEST);
       gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
@@ -366,6 +448,28 @@
       gl.uniform1i(uMatcap, 0);
 
       gl.drawElements(gl.TRIANGLES, indexCount, gl.UNSIGNED_SHORT, 0);
+
+      // ---- pass 2: composite that texture to the screen with the CRT/RGB-split look ----
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.disable(gl.DEPTH_TEST);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+
+      gl.useProgram(postProgram);
+      gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+      gl.enableVertexAttribArray(aQuadPos);
+      gl.vertexAttribPointer(aQuadPos, 2, gl.FLOAT, false, 0, 0);
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+      gl.uniform1i(uScene, 0);
+      gl.uniform2f(uAberration, ABERRATION_PX / canvas.width, 0.0);
+      gl.uniform1f(uScanlineCount, SCANLINE_COUNT);
+      gl.uniform1f(uScanlineStrength, SCANLINE_STRENGTH);
+      gl.uniform1f(uVignetteStrength, VIGNETTE_STRENGTH);
+
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
       requestAnimationFrame(tick);
     }
