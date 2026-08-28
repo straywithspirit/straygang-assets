@@ -14,16 +14,14 @@
  * view-space normal (no environment map / lighting setup needed).
  *
  * SETUP IN WEBFLOW
- * 1) Add an Embed element wherever the logo should appear, containing:
- *      <div id="straygang-logo-hitzone">
- *        <div id="straygang-logo" style="width:100%;height:100%;"></div>
- *      </div>
- *    The outer "hitzone" div is what the mouse-magnet / drag interaction
- *    listens on; the inner "straygang-logo" div is what actually renders
- *    the chrome logo. Size each independently in the Designer — the
- *    hitzone can be bigger or smaller than the visible logo box. (Older
- *    embeds with just the single `straygang-logo` div still work exactly
- *    as before — the hitzone is optional.)
+ * 1) Add an Embed element wherever the logo should appear, containing just:
+ *      <div id="straygang-logo"></div>
+ *    That's the only div needed. Size the Embed component itself (in the
+ *    Designer, like any other element) to whatever you want the mouse-
+ *    magnet/drag zone to be — the script binds interaction to this div's
+ *    own parent element automatically, no extra id or div required. Size
+ *    #straygang-logo itself smaller (e.g. width: 60%) with CSS to have the
+ *    visible logo sit centered inside a bigger interactive area.
  * 2) Upload this file to Webflow's Assets panel, copy its hosted URL.
  * 3) In the same Embed element (or Site Settings -> Custom Code, footer),
  *    add:
@@ -35,20 +33,21 @@
   "use strict";
 
   const CONTAINER_ID = "straygang-logo";
-  const HITZONE_ID = "straygang-logo-hitzone";
   const FALLBACK_IMAGE_ATTR = "data-fallback-src"; // optional: static logo image url for no-WebGL fallback
 
   function init() {
     const container = document.getElementById(CONTAINER_ID);
     if (!container) return;
 
-    // the hitzone is what the mouse-magnet/drag interaction binds to; if the
-    // page doesn't have one (older embed), fall back to the render box itself
-    // so behavior is unchanged.
-    const hitzone = document.getElementById(HITZONE_ID) || container;
+    // No separate "hitzone" element to add or configure. The mouse-magnet/
+    // drag interaction just binds to whatever element wraps this div --
+    // in Webflow that's the Embed component itself, which you already
+    // resize directly in the Designer. Size #straygang-logo (this div)
+    // smaller than that with CSS and it'll sit centered inside it.
+    const hitzone = container.parentElement || container;
 
     hitzone.style.touchAction = "pan-y";
-    hitzone.style.cursor = "grab";
+    hitzone.style.cursor = "pointer";
     if (window.getComputedStyle(container).position === "static") {
       container.style.position = "relative";
     }
@@ -322,7 +321,7 @@
 
     const IDLE_SPEED = prefersReducedMotion ? 0 : 0.55;
     const DRAG_SENSITIVITY = 0.012;
-    const MAX_PULL = 0.20;
+    const MAX_PULL = 0.045;
     const HOVER_EASE = 6.0;
     const RELEASE_EASE = 2.2;
     const MAX_FLICK_VEL = 14.0;
@@ -372,7 +371,6 @@
 
     hitzone.addEventListener("pointerdown", (e) => {
       dragging = true;
-      hitzone.style.cursor = "grabbing";
       hitzone.setPointerCapture(e.pointerId);
       lastPointerX = e.clientX;
       lastPointerT = performance.now();
@@ -383,7 +381,6 @@
     function endDrag(e) {
       if (!dragging) return;
       dragging = false;
-      hitzone.style.cursor = "grab";
       try { hitzone.releasePointerCapture(e.pointerId); } catch (err) {}
       if (recentDeltas.length) {
         const avg = recentDeltas.reduce((a,b) => a+b, 0) / recentDeltas.length;
