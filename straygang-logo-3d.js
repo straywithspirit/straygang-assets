@@ -162,7 +162,8 @@
     "uniform float uVignetteStrength;\n" +
     "uniform float uTime;\n" +
     "uniform float uFisheyeStrength;\n" +
-    "uniform float uAppearBurst;\n" +
+    "uniform float uAppearElapsed;\n" +
+    "uniform float uAppearDur;\n" +
     "float hash(float n){ return fract(sin(n) * 43758.5453123); }\n" +
     "void main(){\n" +
     "  float t = mod(uTime, 1000.0);\n" +
@@ -171,18 +172,34 @@
     "  uv += fc * dot(fc, fc) * uFisheyeStrength;\n" +
     "  float burstPeriod = 3.5;\n" +
     "  float burstDur = 0.16;\n" +
-    "  float burstOn = max(step(mod(t, burstPeriod), burstDur), uAppearBurst);\n" +
+    "  float burstOn = step(mod(t, burstPeriod), burstDur);\n" +
     "  float burstId = floor(t / burstPeriod);\n" +
     "  float bandId = floor(uv.y * 20.0);\n" +
     "  float glitchSeed = hash(bandId * 0.37 + burstId * 3.1);\n" +
     "  float bandOn = step(0.5, glitchSeed) * burstOn;\n" +
     "  float glitchAmt = (hash(bandId * 1.71 + burstId * 2.3) - 0.5) * 0.09;\n" +
     "  uv.x += bandOn * glitchAmt;\n" +
-    "  vec4 cr = texture2D(uScene, uv + uAberration);\n" +
+    "  vec2 ab = uAberration;\n" +
+    "  float revealMask = 1.0;\n" +
+    "  vec3 addCol = vec3(0.0);\n" +
+    "  bool appearActive = (uAppearElapsed >= 0.0 && uAppearElapsed <= uAppearDur);\n" +
+    "  if (appearActive) {\n" +
+    "    float p = clamp(uAppearElapsed / uAppearDur, 0.0, 1.0);\n" +
+    "    float scanY = mix(1.15, -0.15, p);\n" +
+    "    float distToScan = abs(uv.y - scanY);\n" +
+    "    float scanGlow = exp(-distToScan * distToScan * 380.0);\n" +
+    "    revealMask = smoothstep(scanY - 0.015, scanY + 0.015, uv.y);\n" +
+    "    ab = uAberration * (1.0 + 10.0 * scanGlow);\n" +
+    "    addCol = vec3(0.15, 0.55, 0.7) * scanGlow * 2.2;\n" +
+    "  }\n" +
+    "  vec4 cr = texture2D(uScene, uv + ab);\n" +
     "  vec4 cg = texture2D(uScene, uv);\n" +
-    "  vec4 cb = texture2D(uScene, uv - uAberration);\n" +
+    "  vec4 cb = texture2D(uScene, uv - ab);\n" +
     "  float a = max(cr.a, max(cg.a, cb.a));\n" +
     "  vec3 col = vec3(cr.r, cg.g, cb.b);\n" +
+    "  col += addCol;\n" +
+    "  col *= revealMask;\n" +
+    "  if (appearActive) a *= revealMask;\n" +
     "  float grain = hash(dot(uv, vec2(12.9898, 78.233)) + t * 61.7) - 0.5;\n" +
     "  col += grain * (0.015 + burstOn * 0.05);\n" +
     "  vec2 centered = uv - 0.5;\n" +
@@ -273,7 +290,8 @@
     const uVignetteStrength = gl.getUniformLocation(postProgram, "uVignetteStrength");
     const uTime = gl.getUniformLocation(postProgram, "uTime");
     const uFisheyeStrength = gl.getUniformLocation(postProgram, "uFisheyeStrength");
-    const uAppearBurst = gl.getUniformLocation(postProgram, "uAppearBurst");
+    const uAppearElapsed = gl.getUniformLocation(postProgram, "uAppearElapsed");
+    const uAppearDur = gl.getUniformLocation(postProgram, "uAppearDur");
 
     const quadBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
@@ -332,10 +350,11 @@
     const ABERRATION_PX = 3.6;      // RGB-split distance, in pixels, for the retro CRT feel
     const VIGNETTE_STRENGTH = 0.24; // edge darkening amount
     const FISHEYE_STRENGTH = 0.5;  // lens-bulge amount; 0 = off
-    const APPEAR_BURST_DUR = 0.4;   // seconds the one-shot "materialize" glitch runs for on reveal
+    const APPEAR_BURST_DUR = 0.75;  // seconds the scanline "materialize" sweep takes on reveal
     const APPEAR_FAILSAFE_MS = 12000; // if ".pl-appear-01" never reveals, appear anyway after this long
+    const INITIAL_ROT_Y = -0.4;     // start turned back a little instead of dead front-on
 
-    let rotY = 0, velY = IDLE_SPEED, pullX = 0, pullY = 0, pullTargetX = 0, pullTargetY = 0;
+    let rotY = INITIAL_ROT_Y, velY = IDLE_SPEED, pullX = 0, pullY = 0, pullTargetX = 0, pullTargetY = 0;
     let dragging = false, hovering = false;
     let lastPointerX = 0, lastPointerT = 0;
     let recentDeltas = [];
@@ -395,14 +414,16 @@
 
     // ---- optional sync with the page loader's ".pl-appear-01" reveal ----
     // If this logo's hitzone (or an ancestor) carries the loader's
-    // "pl-appear-01" class, the spin stays frozen and a one-shot glitch
-    // burst is held ready until the loader actually flips that element's
-    // opacity to reveal it -- at which point the idle spin kicks off and
-    // the glitch plays, timed to the exact same moment the loader reveals
-    // it (rather than guessing a fixed delay that drifts out of sync if
-    // the loader's own timing is ever changed). If no ".pl-appear-01"
-    // ancestor is found at all, none of this applies and the logo behaves
-    // exactly as before -- spinning immediately, no special appear effect.
+    // "pl-appear-01" class, the spin stays frozen and a one-shot "scan
+    // pulse" reveal is held ready until the loader actually flips that
+    // element's opacity to reveal it -- at which point the idle spin kicks
+    // off and a bright scanline sweeps down, "painting" the logo into view
+    // with a cyan RGB-split glow riding the line, timed to the exact same
+    // moment the loader reveals it (rather than guessing a fixed delay
+    // that drifts out of sync if the loader's own timing is ever changed).
+    // If no ".pl-appear-01" ancestor is found at all, none of this applies
+    // and the logo behaves exactly as before -- spinning immediately, no
+    // special appear effect.
     function findAppearEl(el) {
       let n = el;
       while (n && n.nodeType === 1) {
@@ -475,10 +496,9 @@
         pullY = lerp(pullY, pullTargetY, 1 - Math.exp(-HOVER_EASE * dt));
       }
 
-      let appearBurstOn = 0.0;
+      let appearElapsed = -1.0;
       if (appearBurstStart >= 0) {
-        const sinceAppear = (now - appearBurstStart) / 1000;
-        appearBurstOn = (sinceAppear >= 0 && sinceAppear <= APPEAR_BURST_DUR) ? 1.0 : 0.0;
+        appearElapsed = (now - appearBurstStart) / 1000;
       }
 
       const rotation = m4rotateY(rotY);
@@ -537,7 +557,8 @@
       gl.uniform1f(uVignetteStrength, VIGNETTE_STRENGTH);
       gl.uniform1f(uTime, timeSec);
       gl.uniform1f(uFisheyeStrength, FISHEYE_STRENGTH);
-      gl.uniform1f(uAppearBurst, appearBurstOn);
+      gl.uniform1f(uAppearElapsed, appearElapsed);
+      gl.uniform1f(uAppearDur, APPEAR_BURST_DUR);
 
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
