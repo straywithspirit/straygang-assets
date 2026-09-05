@@ -162,6 +162,7 @@
     "uniform float uVignetteStrength;\n" +
     "uniform float uTime;\n" +
     "uniform float uFisheyeStrength;\n" +
+    "uniform float uAppearBurst;\n" +
     "float hash(float n){ return fract(sin(n) * 43758.5453123); }\n" +
     "void main(){\n" +
     "  float t = mod(uTime, 1000.0);\n" +
@@ -170,7 +171,7 @@
     "  uv += fc * dot(fc, fc) * uFisheyeStrength;\n" +
     "  float burstPeriod = 3.5;\n" +
     "  float burstDur = 0.16;\n" +
-    "  float burstOn = step(mod(t, burstPeriod), burstDur);\n" +
+    "  float burstOn = max(step(mod(t, burstPeriod), burstDur), uAppearBurst);\n" +
     "  float burstId = floor(t / burstPeriod);\n" +
     "  float bandId = floor(uv.y * 20.0);\n" +
     "  float glitchSeed = hash(bandId * 0.37 + burstId * 3.1);\n" +
@@ -272,6 +273,7 @@
     const uVignetteStrength = gl.getUniformLocation(postProgram, "uVignetteStrength");
     const uTime = gl.getUniformLocation(postProgram, "uTime");
     const uFisheyeStrength = gl.getUniformLocation(postProgram, "uFisheyeStrength");
+    const uAppearBurst = gl.getUniformLocation(postProgram, "uAppearBurst");
 
     const quadBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
@@ -330,6 +332,8 @@
     const ABERRATION_PX = 3.6;      // RGB-split distance, in pixels, for the retro CRT feel
     const VIGNETTE_STRENGTH = 0.24; // edge darkening amount
     const FISHEYE_STRENGTH = 0.5;  // lens-bulge amount; 0 = off
+    const APPEAR_BURST_DUR = 0.4;   // seconds the one-shot "materialize" glitch runs for on reveal
+    const APPEAR_FAILSAFE_MS = 12000; // if ".pl-appear-01" never reveals, appear anyway after this long
 
     let rotY = 0, velY = IDLE_SPEED, pullX = 0, pullY = 0, pullTargetX = 0, pullTargetY = 0;
     let dragging = false, hovering = false;
@@ -389,6 +393,49 @@
     hitzone.addEventListener("pointerup", endDrag);
     hitzone.addEventListener("pointercancel", endDrag);
 
+    // ---- optional sync with the page loader's ".pl-appear-01" reveal ----
+    // If this logo's hitzone (or an ancestor) carries the loader's
+    // "pl-appear-01" class, the spin stays frozen and a one-shot glitch
+    // burst is held ready until the loader actually flips that element's
+    // opacity to reveal it -- at which point the idle spin kicks off and
+    // the glitch plays, timed to the exact same moment the loader reveals
+    // it (rather than guessing a fixed delay that drifts out of sync if
+    // the loader's own timing is ever changed). If no ".pl-appear-01"
+    // ancestor is found at all, none of this applies and the logo behaves
+    // exactly as before -- spinning immediately, no special appear effect.
+    function findAppearEl(el) {
+      let n = el;
+      while (n && n.nodeType === 1) {
+        if (n.classList && n.classList.contains("pl-appear-01")) return n;
+        n = n.parentElement;
+      }
+      return null;
+    }
+    const appearEl = findAppearEl(hitzone) || findAppearEl(container);
+    let appeared = !appearEl;
+    let appearBurstStart = -1;
+
+    if (appearEl) {
+      let settled = false;
+      let appearFailSafe;
+      const reveal = () => {
+        if (settled) return;
+        settled = true;
+        appeared = true;
+        appearBurstStart = performance.now();
+        appearObserver.disconnect();
+        clearTimeout(appearFailSafe);
+      };
+      const appearObserver = new MutationObserver(() => {
+        const op = parseFloat(appearEl.style.opacity);
+        if (!isNaN(op) && op > 0) reveal();
+      });
+      appearObserver.observe(appearEl, { attributes: true, attributeFilter: ["style"] });
+      // don't leave the logo frozen/invisible forever if the loader script
+      // errors out or this element never actually gets revealed
+      appearFailSafe = setTimeout(reveal, APPEAR_FAILSAFE_MS);
+    }
+
     let isVisible = false, isPageVisible = !document.hidden, running = false, lastT = 0;
 
     const io = new IntersectionObserver((entries) => {
@@ -419,12 +466,20 @@
       lastT = now;
       const timeSec = (now * 0.001) % 1000;
 
-      if (!dragging) {
-        velY = lerp(velY, IDLE_SPEED, 1 - Math.exp(-RELEASE_EASE * dt));
-        rotY += velY * dt;
+      if (appeared) {
+        if (!dragging) {
+          velY = lerp(velY, IDLE_SPEED, 1 - Math.exp(-RELEASE_EASE * dt));
+          rotY += velY * dt;
+        }
+        pullX = lerp(pullX, pullTargetX, 1 - Math.exp(-HOVER_EASE * dt));
+        pullY = lerp(pullY, pullTargetY, 1 - Math.exp(-HOVER_EASE * dt));
       }
-      pullX = lerp(pullX, pullTargetX, 1 - Math.exp(-HOVER_EASE * dt));
-      pullY = lerp(pullY, pullTargetY, 1 - Math.exp(-HOVER_EASE * dt));
+
+      let appearBurstOn = 0.0;
+      if (appearBurstStart >= 0) {
+        const sinceAppear = (now - appearBurstStart) / 1000;
+        appearBurstOn = (sinceAppear >= 0 && sinceAppear <= APPEAR_BURST_DUR) ? 1.0 : 0.0;
+      }
 
       const rotation = m4rotateY(rotY);
       const scaled = m4multiply(rotation, m4scale(MODEL_SCALE));
@@ -482,6 +537,7 @@
       gl.uniform1f(uVignetteStrength, VIGNETTE_STRENGTH);
       gl.uniform1f(uTime, timeSec);
       gl.uniform1f(uFisheyeStrength, FISHEYE_STRENGTH);
+      gl.uniform1f(uAppearBurst, appearBurstOn);
 
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
