@@ -185,7 +185,15 @@
     "  bool appearActive = (uAppearElapsed >= 0.0 && uAppearElapsed <= uAppearDur);\n" +
     "  if (appearActive) {\n" +
     "    float p = clamp(uAppearElapsed / uAppearDur, 0.0, 1.0);\n" +
-    "    float scanY = mix(1.15, -0.15, p);\n" +
+    "    // scanY sweeps from just above to just below where the logo shape\n" +
+    "    // actually sits in the frame (roughly uv.y 0.18-0.79 at the current\n" +
+    "    // CAMERA_Z/FOV_Y/MODEL_SCALE framing), not the full 0..1 canvas --\n" +
+    "    // the canvas has transparent margin above/below the mesh, and\n" +
+    "    // sweeping the full canvas height wasted a big chunk of the reveal\n" +
+    "    // duration on empty space before/after it ever touched the logo.\n" +
+    "    // If those camera constants change, re-measure the mesh's uv.y\n" +
+    "    // extent (e.g. via gl.readPixels alpha) and retune these numbers.\n" +
+    "    float scanY = mix(0.92, 0.06, p);\n" +
     "    float distToScan = abs(uv.y - scanY);\n" +
     "    float scanGlow = exp(-distToScan * distToScan * 380.0);\n" +
     "    revealMask = smoothstep(scanY - 0.015, scanY + 0.015, uv.y);\n" +
