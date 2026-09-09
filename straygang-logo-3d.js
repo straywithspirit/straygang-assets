@@ -65,7 +65,13 @@
     container.appendChild(canvas);
 
     function getGL() {
-      const opts = { antialias: true, alpha: true, premultipliedAlpha: false };
+      // premultipliedAlpha: true (the default) -- WebKit has long-standing quirks
+      // compositing alpha:true canvases against page content when premultipliedAlpha
+      // is false, which let a transparent pixel's raw RGB leak through instead of
+      // being hidden. Premultiplying color by alpha in the shader itself (see
+      // POST_FRAGMENT_SRC's final "col *= a;") makes a=0 pixels genuinely (0,0,0,0)
+      // regardless of how any given browser's compositor treats the alpha channel.
+      const opts = { antialias: true, alpha: true, premultipliedAlpha: true };
       return canvas.getContext("webgl", opts) || canvas.getContext("experimental-webgl", opts);
     }
 
@@ -212,6 +218,7 @@
     "  col += grain * (0.015 + burstOn * 0.05);\n" +
     "  vec2 centered = uv - 0.5;\n" +
     "  col *= 1.0 - uVignetteStrength * dot(centered, centered) * 2.0;\n" +
+    "  col *= a;\n" +
     "  gl_FragColor = vec4(col, a);\n" +
     "}\n";
 
